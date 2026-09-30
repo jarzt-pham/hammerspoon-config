@@ -1,4 +1,25 @@
 require("hs.ipc")
+
+-- Timers nobody references can be garbage-collected before they fire, silently stopping a
+-- multi-step sequence. Keep every pending timer alive until it is done.
+local liveTimers = {}
+local function doAfter(sec, fn)
+  local t
+  t = hs.timer.doAfter(sec, function() liveTimers[t] = nil; fn() end)
+  liveTimers[t] = true
+  return t
+end
+local function doUntil(pred, fn, interval)
+  local t
+  t = hs.timer.doUntil(function()
+    local stop = pred()
+    if stop then liveTimers[t] = nil end
+    return stop
+  end, fn, interval)
+  liveTimers[t] = true
+  return t
+end
+
 -- Teams: fn+cmd+t, then fn+cmd+s  ->  switch to the other org
 -- Deep links (msteams:...?tenantId=) don't switch org in new Teams, so drive the UI:
 -- avatar button -> click the other org's entry in the profile popup.
@@ -59,7 +80,7 @@ local function switchTeamsOrg()
 
   -- Profile popup sits under the avatar at the window's right edge; poll until the org entry shows.
   local tries = 0
-  hs.timer.doUntil(function() return tries >= 10 end, function()
+  doUntil(function() return tries >= 10 end, function()
     tries = tries + 1
     local entry = find(win,
       function(e) return text(e):find(target, 1, true) and e ~= avatar end,
@@ -88,8 +109,9 @@ local PLACE = {
   ["company.thebrowser.Browser"] = { 1, "left" },        -- Arc
   ["com.tinyspeck.slackmacgap"]  = { 1, "topRight" },    -- Slack + Teams stacked
   ["com.microsoft.teams2"]       = { 1, "topRight" },
-  ["com.openai.codex"]           = { 1, "bottomRight" }, -- ChatGPT + Obsidian stacked
+  ["com.openai.codex"]           = { 1, "bottomRight" }, -- ChatGPT + Obsidian + Claude stacked
   ["md.obsidian"]                = { 1, "bottomRight" },
+  ["com.anthropic.claudefordesktop"] = { 1, "bottomRight" },
   ["com.microsoft.VSCode"]       = { 2, "left" },
   ["org.alacritty"]              = { 2, "alternate" },   -- top-right, bottom-right, top-right, …
 }
@@ -101,11 +123,11 @@ local MOVER = hs.configdir .. "/Spoons/SpaceMover.spoon/native/space-mover"
 local function gotoDesktop(n, desktops, then_)
   hs.eventtap.keyStroke({ "ctrl", "alt", "cmd" }, tostring(n), 0)
   local waited = 0
-  hs.timer.doUntil(function() return waited < 0 end, function()
+  doUntil(function() return waited < 0 end, function()
     waited = waited + 0.1
     if hs.spaces.focusedSpace() == desktops[n] or waited > 2 then
       waited = -1
-      hs.timer.doAfter(0.4, then_) -- let the switch animation finish before querying windows
+      doAfter(0.4, then_) -- let the switch animation finish before querying windows
     end
   end, 0.1)
 end
@@ -165,43 +187,66 @@ local function arrangeDesktops()
 end
 ArrangeDesktops = arrangeDesktops -- exposed for `hs -c "ArrangeDesktops()"`
 
--- After a restart: open every app in PLACE, wait for their windows, then arrange.
+-- After a restart (or after closing windows): make sure every app in PLACE has a window,
+-- then arrange. Closing an app's last window often leaves it running (Arc, Slack…), so
+-- "has a window" is what counts, not "is running".
 local ALACRITTY_WINDOWS = 2
-local function standardWindows(app)
-  return hs.fnutils.filter(app:allWindows(), function(w) return w:isStandard() end)
+
+-- Neither app:allWindows() nor the AX window list sees windows on other desktops, so count
+-- WindowServer windows (CGWindowList, via JXA) that sit on some desktop. The desktop check
+-- drops windows an app keeps hidden after you close them.
+local CG_WINDOWS_JXA = [[osascript -l JavaScript -e 'ObjC.import("CoreGraphics");
+JSON.stringify(ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo($.kCGWindowListOptionAll, 0)))
+  .filter(w => w.kCGWindowLayer === 0 && w.kCGWindowBounds.Height > 100)
+  .map(w => [w.kCGWindowNumber, w.kCGWindowOwnerPID]))']]
+
+local function windowCountsByPid()
+  local onDesktop = {}
+  for _, space in ipairs(spoon.SpaceMover:desktopSpaces() or {}) do
+    for _, id in ipairs(hs.spaces.windowsForSpace(space) or {}) do onDesktop[id] = true end
+  end
+  local counts = {}
+  for _, w in ipairs(hs.json.decode((hs.execute(CG_WINDOWS_JXA))) or {}) do
+    if onDesktop[w[1]] then counts[w[2]] = (counts[w[2]] or 0) + 1 end
+  end
+  return counts
 end
 
--- Only apps launched here are waited on: allWindows() can't see windows on other desktops,
--- so an app that was already running elsewhere would look window-less.
+local function windowCount(bundleID, counts)
+  local app = hs.application.get(bundleID)
+  return app and (counts or windowCountsByPid())[app:pid()] or 0
+end
+
 local function launchWorkspace()
-  local launched = {}
+  local opened = {}
+  local counts = windowCountsByPid()
   for bundleID in pairs(PLACE) do
-    if not hs.application.get(bundleID) then
-      hs.application.open(bundleID)
-      launched[bundleID] = true
+    if windowCount(bundleID, counts) == 0 then
+      hs.execute("open -b " .. bundleID) -- launches, or "reopens" a running app into a new window
+      opened[bundleID] = true
     end
   end
-  if not next(launched) then return arrangeDesktops() end
-  hs.alert.show("Launching apps…")
-  local waited, extraAlacritty = 0, not launched["org.alacritty"]
-  hs.timer.doUntil(function() return waited < 0 end, function()
+  local topUpAlacritty = windowCount("org.alacritty", counts) < ALACRITTY_WINDOWS
+  if not next(opened) and not topUpAlacritty then return arrangeDesktops() end
+  hs.alert.show("Opening apps…")
+  local waited = 0
+  doUntil(function() return waited < 0 end, function()
     waited = waited + 1
-    local pending = {}
-    for bundleID in pairs(launched) do
-      local app = hs.application.get(bundleID)
-      if not app or #standardWindows(app) == 0 then table.insert(pending, bundleID) end
+    local now, pending = windowCountsByPid(), {}
+    for bundleID in pairs(opened) do
+      if windowCount(bundleID, now) == 0 then table.insert(pending, bundleID) end
     end
-    local alacritty = hs.application.get("org.alacritty")
-    if alacritty and not extraAlacritty and #standardWindows(alacritty) > 0 then
-      extraAlacritty = true
-      for _ = #standardWindows(alacritty) + 1, ALACRITTY_WINDOWS do
+    local have = windowCount("org.alacritty", now)
+    if topUpAlacritty and have > 0 then
+      topUpAlacritty = false
+      for _ = have + 1, ALACRITTY_WINDOWS do
         hs.execute("/Applications/Alacritty.app/Contents/MacOS/alacritty msg create-window")
       end
     end
     if #pending == 0 or waited > 60 then
       waited = -1
       if #pending > 0 then hs.alert.show("No window yet: " .. table.concat(pending, ", ")) end
-      hs.timer.doAfter(1, arrangeDesktops) -- let the last windows settle
+      doAfter(1, arrangeDesktops) -- let the last windows settle
     end
   end, 1)
 end
@@ -223,7 +268,7 @@ ChordTap = hs.eventtap.new({ hs.eventtap.event.types.keyDown }, function(ev)
   if armed and key == armed.second and hs.timer.secondsSinceEpoch() - armedAt < 2 then
     local action = armed.action
     armed = nil
-    hs.timer.doAfter(0, action)
+    doAfter(0, action)
     return true
   end
   for _, c in ipairs(CHORDS) do
