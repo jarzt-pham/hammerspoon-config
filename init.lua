@@ -165,12 +165,55 @@ local function arrangeDesktops()
 end
 ArrangeDesktops = arrangeDesktops -- exposed for `hs -c "ArrangeDesktops()"`
 
+-- After a restart: open every app in PLACE, wait for their windows, then arrange.
+local ALACRITTY_WINDOWS = 2
+local function standardWindows(app)
+  return hs.fnutils.filter(app:allWindows(), function(w) return w:isStandard() end)
+end
+
+-- Only apps launched here are waited on: allWindows() can't see windows on other desktops,
+-- so an app that was already running elsewhere would look window-less.
+local function launchWorkspace()
+  local launched = {}
+  for bundleID in pairs(PLACE) do
+    if not hs.application.get(bundleID) then
+      hs.application.open(bundleID)
+      launched[bundleID] = true
+    end
+  end
+  if not next(launched) then return arrangeDesktops() end
+  hs.alert.show("Launching apps…")
+  local waited, extraAlacritty = 0, not launched["org.alacritty"]
+  hs.timer.doUntil(function() return waited < 0 end, function()
+    waited = waited + 1
+    local pending = {}
+    for bundleID in pairs(launched) do
+      local app = hs.application.get(bundleID)
+      if not app or #standardWindows(app) == 0 then table.insert(pending, bundleID) end
+    end
+    local alacritty = hs.application.get("org.alacritty")
+    if alacritty and not extraAlacritty and #standardWindows(alacritty) > 0 then
+      extraAlacritty = true
+      for _ = #standardWindows(alacritty) + 1, ALACRITTY_WINDOWS do
+        hs.execute("/Applications/Alacritty.app/Contents/MacOS/alacritty msg create-window")
+      end
+    end
+    if #pending == 0 or waited > 60 then
+      waited = -1
+      if #pending > 0 then hs.alert.show("No window yet: " .. table.concat(pending, ", ")) end
+      hs.timer.doAfter(1, arrangeDesktops) -- let the last windows settle
+    end
+  end, 1)
+end
+LaunchWorkspace = launchWorkspace -- exposed for `hs -c "LaunchWorkspace()"`
+
 -- Chords: fn+cmd+<first>, then fn+cmd+<second> within 2s. hs.hotkey ignores "fn" (it would grab
 -- plain ⌘T), so read the fn flag from raw key events; plain ⌘ combos pass through untouched.
 local KC = hs.keycodes.map
 local CHORDS = {
   { first = KC.t, second = KC.s, action = switchTeamsOrg },
   { first = KC.r, second = KC.r, action = arrangeDesktops },
+  { first = KC.l, second = KC.l, action = launchWorkspace },
 }
 local armed, armedAt = nil, 0
 ChordTap = hs.eventtap.new({ hs.eventtap.event.types.keyDown }, function(ev)
