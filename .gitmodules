@@ -1,0 +1,3 @@
+[submodule "Spoons/SpaceMover.spoon"]
+	path = Spoons/SpaceMover.spoon
+	url = https://github.com/dsbraz/SpaceMover.spoon.git
