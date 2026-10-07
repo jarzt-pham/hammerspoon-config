@@ -276,24 +276,55 @@ LaunchWorkspace = launchWorkspace -- exposed for `hs -c "LaunchWorkspace()"`
 -- keyboards handle fn in firmware and never send it to macOS.) Other combos pass through untouched.
 local KC = hs.keycodes.map
 local CHORDS = {
-  { first = KC.t, second = KC.s, action = switchTeamsOrg },
-  { first = KC.r, second = KC.r, action = arrangeDesktops },
-  { first = KC.l, second = KC.l, action = launchWorkspace },
+  { first = KC.t, second = KC.s, action = switchTeamsOrg,  name = "Switch Teams org" },
+  { first = KC.r, second = KC.r, action = arrangeDesktops, name = "Arrange desktops" },
+  { first = KC.l, second = KC.l, action = launchWorkspace, name = "Open workspace" },
 }
+
+-- Menu bar indicator: shows the chord as it is typed and keeps a short history in its menu.
+local MODS, IDLE = "⌃⌘⇧", "⌨"
+local function keyLabel(code) return MODS .. (KC[code] or "?"):upper() end
+local chordBar = hs.menubar.new()
+local history, resetTimer = {}, nil
+local function showBar(title, holdSec)
+  chordBar:setTitle(title)
+  if resetTimer then resetTimer:stop() end
+  resetTimer = holdSec and doAfter(holdSec, function() chordBar:setTitle(IDLE) end) or nil
+end
+local function record(text)
+  table.insert(history, 1, os.date("%H:%M:%S") .. "   " .. text)
+  history[11] = nil -- keep the last 10
+end
+chordBar:setTitle(IDLE)
+chordBar:setMenu(function()
+  local items = { { title = "Hammerspoon chords", disabled = true }, { title = "-" } }
+  for _, c in ipairs(CHORDS) do
+    table.insert(items, { title = keyLabel(c.first) .. " → " .. keyLabel(c.second) .. "   " .. c.name, disabled = true })
+  end
+  table.insert(items, { title = "-" })
+  table.insert(items, { title = #history > 0 and "Recent" or "No chords yet", disabled = true })
+  for _, h in ipairs(history) do table.insert(items, { title = h, disabled = true }) end
+  return items
+end)
+
 local armed, armedAt = nil, 0
 ChordTap = hs.eventtap.new({ hs.eventtap.event.types.keyDown }, function(ev)
   local fl = ev:getFlags()
   if not (fl.ctrl and fl.cmd and fl.shift and not fl.alt) then return false end
   local key = ev:getKeyCode()
   if armed and key == armed.second and hs.timer.secondsSinceEpoch() - armedAt < 2 then
-    local action = armed.action
+    local c = armed
     armed = nil
-    doAfter(0, action)
+    local keys = keyLabel(c.first) .. " → " .. keyLabel(c.second)
+    showBar(keys .. "  ✓ " .. c.name, 3)
+    record(keys .. "   " .. c.name)
+    doAfter(0, c.action)
     return true
   end
   for _, c in ipairs(CHORDS) do
     if key == c.first then
       armed, armedAt = c, hs.timer.secondsSinceEpoch()
+      showBar(keyLabel(c.first) .. " → …", 2) -- falls back to idle when the 2s window lapses
       return true
     end
   end
