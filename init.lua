@@ -20,7 +20,7 @@ local function doUntil(pred, fn, interval)
   return t
 end
 
--- Teams: fn+cmd+t, then fn+cmd+s  ->  switch to the other org
+-- Teams: ctrl+cmd+shift+t, then ctrl+cmd+shift+s  ->  switch to the other org
 -- Deep links (msteams:...?tenantId=) don't switch org in new Teams, so drive the UI:
 -- avatar button -> click the other org's entry in the profile popup.
 local ORGS = { "JTL-Software-GmbH", "Coduct Solutions GmbH" }
@@ -142,12 +142,14 @@ local function arrangeDesktops()
   local startDesktop = hs.fnutils.indexOf(desktops, hs.spaces.focusedSpace()) or 1
   local startWin = hs.window.focusedWindow()
   local frame = hs.screen.mainScreen():frame()
+  -- Rectangle's "Gaps between windows" setting, so tiles look the same as Rectangle's own.
+  local gap = tonumber((hs.execute("defaults read com.knollsoft.Rectangle gapSize 2>/dev/null"))) or 0
   local alternate, failed, done = 0, 0, {}
 
-  local function place(win, d)
+  local function place(win, bundleID, d)
     if done[win:id()] then return end -- already moved here from an earlier desktop
     done[win:id()] = true
-    local p = PLACE[win:application():bundleID()] or { OTHER_DESKTOP }
+    local p = PLACE[bundleID] or { OTHER_DESKTOP }
     if p[1] ~= d then
       local _, ok = hs.execute(MOVER .. " " .. win:id() .. " " .. desktops[p[1]])
       if not ok then failed = failed + 1 return end
@@ -159,7 +161,19 @@ local function arrangeDesktops()
     end
     local u = SLOTS[slot]
     if u then
-      win:setFrame({ x = frame.x + u.x * frame.w, y = frame.y + u.y * frame.h, w = u.w * frame.w, h = u.h * frame.h }, 0)
+      -- Like Rectangle: full gap at screen edges, half a gap on each side of a shared edge,
+      -- so neighbouring tiles end up exactly one gap apart.
+      local function inset(start, size)
+        return (start == 0 and gap or gap / 2), (start + size >= 1 and gap or gap / 2)
+      end
+      local l, r = inset(u.x, u.w)
+      local t, b = inset(u.y, u.h)
+      win:setFrame({
+        x = frame.x + u.x * frame.w + l,
+        y = frame.y + u.y * frame.h + t,
+        w = u.w * frame.w - l - r,
+        h = u.h * frame.h - t - b,
+      }, 0)
     end
   end
 
@@ -174,12 +188,18 @@ local function arrangeDesktops()
     end
     gotoDesktop(d, desktops, function()
       local here = desktops[d]
-      local wins = hs.fnutils.filter(hs.window.allWindows(), function(w)
-        local s = hs.spaces.windowSpaces(w)
-        return w:isStandard() and not w:isFullScreen() and w:application() and s and #s == 1 and s[1] == here
-      end)
-      table.sort(wins, function(a, b) return a:id() < b:id() end) -- stable Alacritty top/bottom order
-      for _, w in ipairs(wins) do place(w, d) end
+      -- Resolve each window's app once: the pid -> app lookup fails intermittently (LuaSkin
+      -- "Unable to fetch NSRunningApplication"), and a second lookup returning nil used to
+      -- throw and abort the whole sequence. Unresolvable windows are skipped.
+      local wins = {}
+      for _, w in ipairs(hs.window.allWindows()) do
+        local s, app = hs.spaces.windowSpaces(w), w:application()
+        if app and w:isStandard() and not w:isFullScreen() and s and #s == 1 and s[1] == here then
+          table.insert(wins, { win = w, bundleID = app:bundleID() })
+        end
+      end
+      table.sort(wins, function(a, b) return a.win:id() < b.win:id() end) -- stable Alacritty top/bottom order
+      for _, e in ipairs(wins) do place(e.win, e.bundleID, d) end
       visitNext()
     end)
   end
@@ -252,8 +272,8 @@ local function launchWorkspace()
 end
 LaunchWorkspace = launchWorkspace -- exposed for `hs -c "LaunchWorkspace()"`
 
--- Chords: fn+cmd+<first>, then fn+cmd+<second> within 2s. hs.hotkey ignores "fn" (it would grab
--- plain ⌘T), so read the fn flag from raw key events; plain ⌘ combos pass through untouched.
+-- Chords: ctrl+cmd+shift+<first>, then ctrl+cmd+shift+<second> within 2s. (Not fn: external
+-- keyboards handle fn in firmware and never send it to macOS.) Other combos pass through untouched.
 local KC = hs.keycodes.map
 local CHORDS = {
   { first = KC.t, second = KC.s, action = switchTeamsOrg },
@@ -263,7 +283,7 @@ local CHORDS = {
 local armed, armedAt = nil, 0
 ChordTap = hs.eventtap.new({ hs.eventtap.event.types.keyDown }, function(ev)
   local fl = ev:getFlags()
-  if not (fl.fn and fl.cmd and not fl.alt and not fl.ctrl and not fl.shift) then return false end
+  if not (fl.ctrl and fl.cmd and fl.shift and not fl.alt) then return false end
   local key = ev:getKeyCode()
   if armed and key == armed.second and hs.timer.secondsSinceEpoch() - armedAt < 2 then
     local action = armed.action

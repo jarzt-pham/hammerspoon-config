@@ -4,8 +4,9 @@ Personal [Hammerspoon](https://www.hammerspoon.org/) config (`~/.hammerspoon`).
 
 | Hotkey | Action |
 |---|---|
-| `fn+⌘T` → `fn+⌘S` | Switch Microsoft Teams between the two orgs in `ORGS` |
-| `fn+⌘R` → `fn+⌘R` | Move windows to their desktop and tile them (see `PLACE` in `init.lua`) |
+| `⌃⌘⇧T` → `⌃⌘⇧S` | Switch Microsoft Teams between the two orgs in `ORGS` |
+| `⌃⌘⇧R` → `⌃⌘⇧R` | Move windows to their desktop and tile them (see `PLACE` in `init.lua`) |
+| `⌃⌘⇧L` → `⌃⌘⇧L` | Open the apps in `PLACE` that have no window (e.g. after a restart), then arrange |
 
 ## Setup
 
