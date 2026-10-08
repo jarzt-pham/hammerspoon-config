@@ -272,6 +272,42 @@ local function launchWorkspace()
 end
 LaunchWorkspace = launchWorkspace -- exposed for `hs -c "LaunchWorkspace()"`
 
+-- Alacritty has no Window menu (so no ⌘`): list its windows by title in a chooser
+-- (type to filter, arrows + Enter). Windows on another desktop are invisible to
+-- app:allWindows(), so activate Alacritty first — macOS jumps to its desktop.
+local alacrittyChooser = hs.chooser.new(function(choice)
+  if not choice then return end
+  local w = hs.window.get(choice.id)
+  if w then w:focus() end
+end)
+alacrittyChooser:placeholderText("Alacritty window…")
+
+local function chooseAlacritty()
+  local app = hs.application.get("org.alacritty")
+  if not app then return hs.alert.show("Alacritty is not running") end
+  app:activate()
+  local tries = 0
+  doUntil(function() return tries < 0 end, function()
+    tries = tries + 1
+    local wins = hs.fnutils.filter(app:allWindows(), function(w) return w:isStandard() end)
+    if #wins == 0 and tries < 10 then return end -- desktop switch still animating
+    tries = -1
+    table.sort(wins, function(a, b) return a:id() < b:id() end)
+    local focused = hs.window.focusedWindow()
+    local choices = {}
+    for i, w in ipairs(wins) do
+      table.insert(choices, {
+        text = w:title() ~= "" and w:title() or ("Alacritty " .. i),
+        subText = (focused and w:id() == focused:id()) and "current window" or nil,
+        id = w:id(),
+      })
+    end
+    if #choices == 0 then return hs.alert.show("No Alacritty windows") end
+    alacrittyChooser:choices(choices)
+    alacrittyChooser:show()
+  end, 0.1)
+end
+
 -- Chords: ctrl+cmd+shift+<first>, then ctrl+cmd+shift+<second> within 2s. (Not fn: external
 -- keyboards handle fn in firmware and never send it to macOS.) Other combos pass through untouched.
 local KC = hs.keycodes.map
@@ -279,6 +315,10 @@ local CHORDS = {
   { first = KC.t, second = KC.s, action = switchTeamsOrg,  name = "Switch Teams org" },
   { first = KC.r, second = KC.r, action = arrangeDesktops, name = "Arrange desktops" },
   { first = KC.l, second = KC.l, action = launchWorkspace, name = "Open workspace" },
+}
+-- Single-press shortcuts (same modifiers, no second key).
+local SINGLES = {
+  { key = KC.a, action = chooseAlacritty, name = "Switch Alacritty window" },
 }
 
 -- Menu bar indicator: shows the chord as it is typed and keeps a short history in its menu.
@@ -301,6 +341,9 @@ chordBar:setMenu(function()
   for _, c in ipairs(CHORDS) do
     table.insert(items, { title = keyLabel(c.first) .. " → " .. keyLabel(c.second) .. "   " .. c.name, disabled = true })
   end
+  for _, s in ipairs(SINGLES) do
+    table.insert(items, { title = keyLabel(s.key) .. "   " .. s.name, disabled = true })
+  end
   table.insert(items, { title = "-" })
   table.insert(items, { title = #history > 0 and "Recent" or "No chords yet", disabled = true })
   for _, h in ipairs(history) do table.insert(items, { title = h, disabled = true }) end
@@ -320,6 +363,15 @@ ChordTap = hs.eventtap.new({ hs.eventtap.event.types.keyDown }, function(ev)
     record(keys .. "   " .. c.name)
     doAfter(0, c.action)
     return true
+  end
+  for _, s in ipairs(SINGLES) do
+    if key == s.key then
+      armed = nil
+      showBar(keyLabel(s.key) .. "  ✓ " .. s.name, 3)
+      record(keyLabel(s.key) .. "   " .. s.name)
+      doAfter(0, s.action)
+      return true
+    end
   end
   for _, c in ipairs(CHORDS) do
     if key == c.first then
