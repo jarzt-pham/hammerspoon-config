@@ -7,6 +7,12 @@ Personal [Hammerspoon](https://www.hammerspoon.org/) config (`~/.hammerspoon`).
 | `⌃⌘⇧T` → `⌃⌘⇧S` | Switch Microsoft Teams between the two orgs in `ORGS` |
 | `⌃⌘⇧R` → `⌃⌘⇧R` | Move windows to their desktop and tile them (see `PLACE` in `init.lua`) |
 | `⌃⌘⇧L` → `⌃⌘⇧L` | Open the apps in `PLACE` that have no window (e.g. after a restart), then arrange |
+| `⌃⌘⇧A` | List Alacritty windows by title; pick with arrows + Enter, type to filter, or `⌘1–9` |
+
+Chords (`→`) need the second combo within 2 seconds.
+
+A `⌨` menu bar item shows each shortcut as you type it and lists the shortcuts plus the last 10 used in its menu.
+If a menu bar manager like Ice hides it, move it to the visible section.
 
 ## Setup
 
